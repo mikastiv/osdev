@@ -1,0 +1,12 @@
+.{
+    .name = .osdev,
+    .version = "0.0.0",
+    .fingerprint = 0x4af830e4c2691cef,
+    .minimum_zig_version = "0.16.0-dev.237+496313a1b",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
