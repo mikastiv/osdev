@@ -19,7 +19,7 @@
             zls.packages.${system}.zls
             curl
             qemu
-            lldb
+            llvm
           ];
         };
       });

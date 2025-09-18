@@ -1,28 +1,38 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
-
-    const exe = b.addExecutable(.{
-        .name = "osdev",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const target = b.resolveTargetQuery(.{
+        .abi = .none,
+        .cpu_arch = .riscv32,
+        .os_tag = .freestanding,
     });
 
-    b.installArtifact(exe);
+    const kernel = b.addExecutable(.{
+        .name = "kernel.elf",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/kernel.zig"),
+            .target = target,
+            .optimize = .ReleaseSmall,
+            .strip = false,
+        }),
+    });
+    kernel.setLinkerScript(b.path("src/kernel.ld"));
+    kernel.entry = .disabled;
 
-    const run_step = b.step("run", "Run the app");
+    b.installArtifact(kernel);
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
-
+    const run_cmd = b.addSystemCommand(&.{"qemu-system-riscv32"});
     run_cmd.step.dependOn(b.getInstallStep());
 
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addArgs(&.{ "-machine", "virt" });
+    run_cmd.addArgs(&.{ "-bios", "default" });
+    run_cmd.addArgs(&.{ "-serial", "mon:stdio" });
+    run_cmd.addArg("-nographic");
+    run_cmd.addArg("--no-reboot");
+
+    run_cmd.addArg("-kernel");
+    run_cmd.addArtifactArg(kernel);
+
+    const run_step = b.step("run", "Launch the kernel");
+    run_step.dependOn(&run_cmd.step);
 }
