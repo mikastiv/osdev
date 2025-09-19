@@ -5,12 +5,14 @@ const bss = @extern([*]u8, .{ .name = "__bss" });
 const bss_end = @extern([*]u8, .{ .name = "__bss_end" });
 const stack_top = @extern([*]u8, .{ .name = "__stack_top" });
 
+var console: common.Console = .init;
+
 export fn kernelMain() noreturn {
     const bss_size = bss_end - bss;
     @memset(bss[0..bss_size], 0);
 
-    common.printf("\nHello %s\n", .{"World"}) catch {};
-    common.printf("1 + 2 = %d, %x\n", .{ 1 + 2, 0x1234abcd }) catch {};
+    console.writer.print("\nHello {s}\n", .{"World"}) catch {};
+    console.writer.print("1 + 2 = {d}, {x}\n", .{ 1 + 2, 0x1234abcd }) catch {};
 
     while (true) asm volatile ("wfi");
 }
