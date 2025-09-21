@@ -1,6 +1,5 @@
 const std = @import("std");
 const common = @import("common.zig");
-const Csr = common.Csr;
 
 const bss = @extern([*]u8, .{ .name = "__bss" });
 const bss_end = @extern([*]u8, .{ .name = "__bss_end" });
@@ -12,12 +11,126 @@ const page_size = 4 * 1024;
 
 var console: common.Console = .init;
 
-export fn kernelMain() noreturn {
-    main() catch |err| {
-        std.debug.panic("failed with: {t}", .{err});
+const Csr = enum {
+    sscratch,
+    stvec,
+    scause,
+    stval,
+    sepc,
+
+    pub fn read(comptime self: Csr) usize {
+        return asm volatile ("csrr %[ret], " ++ @tagName(self)
+            : [ret] "=r" (-> usize),
+        );
+    }
+
+    pub fn write(comptime self: Csr, value: usize) void {
+        asm volatile ("csrw " ++ @tagName(self) ++ ", %[value]"
+            :
+            : [value] "r" (value),
+        );
+    }
+};
+
+const TrapFrame = packed struct {
+    ra: usize,
+    gp: usize,
+    tp: usize,
+    t0: usize,
+    t1: usize,
+    t2: usize,
+    t3: usize,
+    t4: usize,
+    t5: usize,
+    t6: usize,
+    a0: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+    a7: usize,
+    s0: usize,
+    s1: usize,
+    s2: usize,
+    s3: usize,
+    s4: usize,
+    s5: usize,
+    s6: usize,
+    s7: usize,
+    s8: usize,
+    s9: usize,
+    s10: usize,
+    s11: usize,
+};
+
+const Process = struct {
+    const max = 8;
+
+    pid: usize,
+    state: enum { unused, runnable },
+    sp: usize,
+    stack: [8192]u8 align(4),
+
+    const init: Process = .{
+        .pid = 0,
+        .state = .unused,
+        .sp = 0,
+        .stack = @splat(0),
     };
 
-    while (true) asm volatile ("wfi");
+    fn create(entry: *const anyopaque) *Process {
+        var i: usize = 0;
+        const process = for (&processes) |*proc| {
+            if (proc.state == .unused) break proc;
+            i += 1;
+        } else @panic("no free process slots");
+
+        const word_stack = std.mem.bytesAsSlice(usize, &process.stack);
+        var sp = word_stack.len;
+        for (0..12) |_| {
+            sp -= 1;
+            word_stack[sp] = 0;
+        }
+        sp -= 1;
+        word_stack[sp] = @intFromPtr(entry); // ra
+
+        process.pid = i + 1;
+        process.state = .runnable;
+        process.sp = @intFromPtr(&word_stack[sp]);
+
+        return process;
+    }
+};
+
+var processes: [Process.max]Process = @splat(.init);
+
+fn delay() void {
+    for (0..30_000_000) |_| {
+        asm volatile ("nop");
+    }
+}
+
+var process_a: *Process = undefined;
+var process_b: *Process = undefined;
+
+fn processA() void {
+    console.writer.print("Starting process A\n", .{}) catch {};
+    while (true) {
+        console.writer.writeByte('A') catch {};
+        switchContext(&process_a.sp, &process_b.sp);
+        delay();
+    }
+}
+
+fn processB() void {
+    console.writer.print("Starting process B\n", .{}) catch {};
+    while (true) {
+        console.writer.writeByte('B') catch {};
+        switchContext(&process_b.sp, &process_a.sp);
+        delay();
+    }
 }
 
 fn main() !void {
@@ -26,20 +139,11 @@ fn main() !void {
 
     Csr.write(.stvec, @intFromPtr(&kernelEntry));
 
-    const pages0 = allocPages(2);
-    const pages1 = allocPages(1);
+    process_a = Process.create(&processA);
+    process_b = Process.create(&processB);
+    processA();
 
-    try console.writer.print("allocPages test: pages0={*}\n", .{pages0.ptr});
-    try console.writer.print("allocPages test: pages1={*}\n", .{pages1.ptr});
-}
-
-export fn boot() linksection(".text.boot") callconv(.naked) noreturn {
-    asm volatile (
-        \\mv sp, %[stack_top]
-        \\j kernelMain
-        :
-        : [stack_top] "r" (stack_top),
-    );
+    unreachable;
 }
 
 fn allocPages(count: usize) []u8 {
@@ -57,11 +161,71 @@ fn allocPages(count: usize) []u8 {
     return ram[S.next_ram_index .. S.next_ram_index + size];
 }
 
+export fn kernelMain() noreturn {
+    main() catch |err| {
+        std.debug.panic("failed with: {t}", .{err});
+    };
+
+    while (true) asm volatile ("wfi");
+}
+
+export fn boot() linksection(".text.boot") callconv(.naked) noreturn {
+    asm volatile (
+        \\mv sp, %[stack_top]
+        \\j kernelMain
+        :
+        : [stack_top] "r" (stack_top),
+    );
+}
+
+noinline fn switchContext(prev_sp: *usize, next_sp: *usize) void {
+    asm volatile (
+    // Save callee-saved regisers on the current process's stack.
+        \\addi sp, sp, -4 * 13
+        \\sw ra, 0 * 4(sp)
+        \\sw s0, 1 * 4(sp)
+        \\sw s1, 2 * 4(sp)
+        \\sw s2, 3 * 4(sp)
+        \\sw s3, 4 * 4(sp)
+        \\sw s4, 5 * 4(sp)
+        \\sw s5, 6 * 4(sp)
+        \\sw s6, 7 * 4(sp)
+        \\sw s7, 8 * 4(sp)
+        \\sw s8, 9 * 4(sp)
+        \\sw s9, 10 * 4(sp)
+        \\sw s10, 11 * 4(sp)
+        \\sw s11, 12 * 4(sp)
+        // Switch stack pointer.
+        \\sw sp, (%[prev_sp])
+        \\lw sp, (%[next_sp])
+        // Restore callee-saved registers from the next process's stack.
+        \\lw ra, 0 * 4(sp)
+        \\lw s0, 1 * 4(sp)
+        \\lw s1, 2 * 4(sp)
+        \\lw s2, 3 * 4(sp)
+        \\lw s3, 4 * 4(sp)
+        \\lw s4, 5 * 4(sp)
+        \\lw s5, 6 * 4(sp)
+        \\lw s6, 7 * 4(sp)
+        \\lw s7, 8 * 4(sp)
+        \\lw s8, 9 * 4(sp)
+        \\lw s9, 10 * 4(sp)
+        \\lw s10, 11 * 4(sp)
+        \\lw s11, 12 * 4(sp)
+        \\addi sp, sp, 4 * 13
+        :
+        : [prev_sp] "r" (prev_sp),
+          [next_sp] "r" (next_sp),
+    );
+}
+
 export fn kernelEntry() align(4) callconv(.naked) void {
     asm volatile (
+    // Backup stack pointer.
         \\csrw sscratch, sp
+        // Allocate space on the stack.
         \\addi sp, sp, -4 * 31
-        \\
+        // Save registers to a TrapFrame struct.
         \\sw ra, 4 * 0(sp)
         \\sw gp, 4 * 1(sp)
         \\sw tp, 4 * 2(sp)
@@ -92,13 +256,12 @@ export fn kernelEntry() align(4) callconv(.naked) void {
         \\sw s9, 4 * 27(sp)
         \\sw s10, 4 * 28(sp)
         \\sw s11, 4 * 29(sp)
-        \\
         \\csrr a0, sscratch
         \\sw a0, 4 * 30(sp)
-        \\
+        // Call handler with TrapFrame param.
         \\mv a0, sp
         \\call handleTrap
-        \\
+        // Restore registers with values of TrapFrame.
         \\lw ra, 4 * 0(sp)
         \\lw gp, 4 * 1(sp)
         \\lw tp, 4 * 2(sp)
@@ -135,7 +298,7 @@ export fn kernelEntry() align(4) callconv(.naked) void {
     );
 }
 
-export fn handleTrap(frame: *common.TrapFrame) void {
+export fn handleTrap(frame: *TrapFrame) void {
     _ = frame;
     const scause = Csr.read(.scause);
     const stval = Csr.read(.stval);

@@ -1,60 +1,6 @@
 const std = @import("std");
 const sbi = @import("sbi.zig");
 
-pub const Csr = enum {
-    sscratch,
-    stvec,
-    scause,
-    stval,
-    sepc,
-
-    pub fn read(comptime self: Csr) usize {
-        return asm ("csrr %[ret], " ++ @tagName(self)
-            : [ret] "=r" (-> usize),
-        );
-    }
-
-    pub fn write(comptime self: Csr, value: usize) void {
-        asm volatile ("csrw " ++ @tagName(self) ++ ", %[value]"
-            :
-            : [value] "r" (value),
-        );
-    }
-};
-
-pub const TrapFrame = packed struct {
-    ra: usize,
-    gp: usize,
-    tp: usize,
-    t0: usize,
-    t1: usize,
-    t2: usize,
-    t3: usize,
-    t4: usize,
-    t5: usize,
-    t6: usize,
-    a0: usize,
-    a1: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: usize,
-    a6: usize,
-    a7: usize,
-    s0: usize,
-    s1: usize,
-    s2: usize,
-    s3: usize,
-    s4: usize,
-    s5: usize,
-    s6: usize,
-    s7: usize,
-    s8: usize,
-    s9: usize,
-    s10: usize,
-    s11: usize,
-};
-
 pub const Console = struct {
     writer: std.Io.Writer,
 
