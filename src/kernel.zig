@@ -80,23 +80,22 @@ const Process = struct {
         .stack = @splat(0),
     };
 
-    fn create(entry: *const anyopaque) *Process {
-        var i: usize = 0;
+    fn create(entry: ?*const anyopaque) *Process {
         const process = for (&processes) |*proc| {
             if (proc.state == .unused) break proc;
-            i += 1;
         } else @panic("no free process slots");
 
         const word_stack = std.mem.bytesAsSlice(usize, &process.stack);
         var sp = word_stack.len;
-        for (0..12) |_| {
+        for (0..12) |_| { // s0 to s11
             sp -= 1;
             word_stack[sp] = 0;
         }
         sp -= 1;
         word_stack[sp] = @intFromPtr(entry); // ra
 
-        process.pid = i + 1;
+        const offset = process - &processes[0];
+        process.pid = offset + 1;
         process.state = .runnable;
         process.sp = @intFromPtr(&word_stack[sp]);
 
@@ -106,31 +105,49 @@ const Process = struct {
 
 var processes: [Process.max]Process = @splat(.init);
 
-fn delay() void {
-    for (0..30_000_000) |_| {
-        asm volatile ("nop");
-    }
-}
-
 var process_a: *Process = undefined;
 var process_b: *Process = undefined;
 
 fn processA() void {
-    console.writer.print("Starting process A\n", .{}) catch {};
+    console.writer.print("Starting process A, pid={d}\n", .{process_a.pid}) catch {};
     while (true) {
         console.writer.writeByte('A') catch {};
-        switchContext(&process_a.sp, &process_b.sp);
-        delay();
+        yield();
     }
 }
 
 fn processB() void {
-    console.writer.print("Starting process B\n", .{}) catch {};
+    console.writer.print("Starting process B, pid={d}\n", .{process_b.pid}) catch {};
     while (true) {
         console.writer.writeByte('B') catch {};
-        switchContext(&process_b.sp, &process_a.sp);
-        delay();
+        yield();
     }
+}
+
+var current_process: *Process = undefined;
+var idle_process: *Process = undefined;
+
+fn yield() void {
+    var next_process = idle_process;
+    for (0..Process.max) |i| {
+        const index = (current_process.pid + i) % Process.max;
+        const process = &processes[index];
+        if (process.state == .runnable and process.pid > 0) {
+            next_process = process;
+            break;
+        }
+    }
+
+    if (next_process == current_process) return;
+
+    asm volatile ("csrw sscratch, %[next_top]"
+        :
+        : [next_top] "r" (next_process.stack[0..].ptr[next_process.stack.len]),
+    );
+
+    const prev_process = current_process;
+    current_process = next_process;
+    switchContext(&prev_process.sp, &next_process.sp);
 }
 
 fn main() !void {
@@ -139,9 +156,14 @@ fn main() !void {
 
     Csr.write(.stvec, @intFromPtr(&kernelEntry));
 
+    idle_process = Process.create(null);
+    idle_process.pid = 0;
+    current_process = idle_process;
+
     process_a = Process.create(&processA);
     process_b = Process.create(&processB);
-    processA();
+
+    yield();
 
     unreachable;
 }
@@ -180,7 +202,8 @@ export fn boot() linksection(".text.boot") callconv(.naked) noreturn {
 
 noinline fn switchContext(prev_sp: *usize, next_sp: *usize) void {
     asm volatile (
-    // Save callee-saved regisers on the current process's stack.
+        \\
+        // Save callee-saved regisers on the current process's stack.
         \\addi sp, sp, -4 * 13
         \\sw ra, 0 * 4(sp)
         \\sw s0, 1 * 4(sp)
@@ -221,8 +244,9 @@ noinline fn switchContext(prev_sp: *usize, next_sp: *usize) void {
 
 export fn kernelEntry() align(4) callconv(.naked) void {
     asm volatile (
-    // Backup stack pointer.
-        \\csrw sscratch, sp
+        \\
+        // Retrieve kernel stack of the current process from sscratch.
+        \\csrrw sp, sscratch, sp
         // Allocate space on the stack.
         \\addi sp, sp, -4 * 31
         // Save registers to a TrapFrame struct.
@@ -256,8 +280,12 @@ export fn kernelEntry() align(4) callconv(.naked) void {
         \\sw s9, 4 * 27(sp)
         \\sw s10, 4 * 28(sp)
         \\sw s11, 4 * 29(sp)
+        // Retrieve and save the sp at the time of exception.
         \\csrr a0, sscratch
         \\sw a0, 4 * 30(sp)
+        // Reset the kernel stack
+        \\addi a0, sp, 4 * 31
+        \\csrw sscratch, a0
         // Call handler with TrapFrame param.
         \\mv a0, sp
         \\call handleTrap
