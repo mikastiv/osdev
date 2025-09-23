@@ -1,6 +1,7 @@
 const std = @import("std");
 const common = @import("common.zig");
 
+const kernel_base = @extern([*]u8, .{ .name = "__kernel_base" });
 const bss = @extern([*]u8, .{ .name = "__bss" });
 const bss_end = @extern([*]u8, .{ .name = "__bss_end" });
 const stack_top = @extern([*]u8, .{ .name = "__stack_top" });
@@ -71,12 +72,14 @@ const Process = struct {
     pid: usize,
     state: enum { unused, runnable },
     sp: usize,
+    page_table: [*]PageTableEntry,
     stack: [8192]u8 align(4),
 
     const init: Process = .{
         .pid = 0,
         .state = .unused,
         .sp = 0,
+        .page_table = undefined,
         .stack = @splat(0),
     };
 
@@ -94,13 +97,52 @@ const Process = struct {
         sp -= 1;
         word_stack[sp] = @intFromPtr(entry); // ra
 
+        const page_table: [*]PageTableEntry = @ptrCast(@alignCast(allocPages(1)));
+
+        const page_count = (ram_end - kernel_base) / page_size;
+        const pages: [*][page_size]u8 = @ptrCast(kernel_base);
+        for (pages[0..page_count]) |*page| {
+            const flags: PageTableEntry.Flags = .{ .read = true, .write = true, .execute = true };
+            const paddr = @intFromPtr(page);
+            mapPage(page_table, paddr, paddr, flags);
+        }
+
         const offset = process - &processes[0];
         process.pid = offset + 1;
         process.state = .runnable;
         process.sp = @intFromPtr(&word_stack[sp]);
+        process.page_table = page_table;
 
         return process;
     }
+};
+
+const PageTableEntry = packed struct(u32) {
+    const Flags = packed struct(u8) {
+        valid: bool = false,
+        read: bool = false,
+        write: bool = false,
+        execute: bool = false,
+        user: bool = false,
+        global: bool = false,
+        accessed: bool = false,
+        dirty: bool = false,
+    };
+
+    flags: Flags,
+    _reserved: u2 = 0,
+    ppn: u22,
+
+    fn asPhysicalAddr(self: PageTableEntry) [*]PageTableEntry {
+        const ppn: u32 = self.ppn;
+        return @ptrFromInt(ppn * page_size);
+    }
+};
+
+const VirtualAddr = packed struct(u32) {
+    offset: u12,
+    vpn_0: u10,
+    vpn_1: u10,
 };
 
 var processes: [Process.max]Process = @splat(.init);
@@ -127,7 +169,57 @@ fn processB() void {
 var current_process: *Process = undefined;
 var idle_process: *Process = undefined;
 
-fn yield() void {
+fn main() !void {
+    const bss_size = bss_end - bss;
+    @memset(bss[0..bss_size], 0);
+
+    Csr.write(.stvec, @intFromPtr(&kernelEntry));
+
+    console.writer.print("creating idle\n", .{}) catch {};
+    idle_process = Process.create(null);
+    idle_process.pid = 0;
+    current_process = idle_process;
+
+    console.writer.print("creating A\n", .{}) catch {};
+    process_a = Process.create(&processA);
+    console.writer.print("creating B\n", .{}) catch {};
+    process_b = Process.create(&processB);
+
+    yield();
+
+    unreachable;
+}
+
+fn mapPage(table1: [*]PageTableEntry, vaddr: usize, paddr: usize, flags: PageTableEntry.Flags) void {
+    if (!std.mem.isAligned(vaddr, page_size)) {
+        std.debug.panic("unaligned vaddr: {x}", .{vaddr});
+    }
+
+    if (!std.mem.isAligned(paddr, page_size)) {
+        std.debug.panic("unaligned paddr: {x}", .{paddr});
+    }
+
+    const virtual_addr: VirtualAddr = @bitCast(vaddr);
+    if (!table1[virtual_addr.vpn_1].flags.valid) {
+        const page_table = allocPages(1);
+        const ppn = @intFromPtr(page_table.ptr) / page_size;
+        table1[virtual_addr.vpn_1] = .{
+            .flags = .{ .valid = true },
+            .ppn = @intCast(ppn),
+        };
+    }
+
+    var new_entry: PageTableEntry = .{
+        .flags = flags,
+        .ppn = @intCast(paddr / page_size),
+    };
+    new_entry.flags.valid = true;
+
+    const table0 = table1[virtual_addr.vpn_1].asPhysicalAddr();
+    table0[virtual_addr.vpn_0] = new_entry;
+}
+
+noinline fn yield() void {
     var next_process = idle_process;
     for (0..Process.max) |i| {
         const index = (current_process.pid + i) % Process.max;
@@ -140,32 +232,21 @@ fn yield() void {
 
     if (next_process == current_process) return;
 
-    asm volatile ("csrw sscratch, %[next_top]"
+    const satp_sv32: usize = 1 << 31;
+    const ppn = @intFromPtr(next_process.page_table) / page_size;
+    asm volatile (
+        \\sfence.vma
+        \\csrw satp, %[satp]
+        \\sfence.vma
+        \\csrw sscratch, %[next_top]
         :
-        : [next_top] "r" (next_process.stack[0..].ptr[next_process.stack.len]),
+        : [satp] "r" (satp_sv32 | ppn),
+          [next_top] "r" (next_process.stack[next_process.stack.len..].ptr),
     );
 
     const prev_process = current_process;
     current_process = next_process;
     switchContext(&prev_process.sp, &next_process.sp);
-}
-
-fn main() !void {
-    const bss_size = bss_end - bss;
-    @memset(bss[0..bss_size], 0);
-
-    Csr.write(.stvec, @intFromPtr(&kernelEntry));
-
-    idle_process = Process.create(null);
-    idle_process.pid = 0;
-    current_process = idle_process;
-
-    process_a = Process.create(&processA);
-    process_b = Process.create(&processB);
-
-    yield();
-
-    unreachable;
 }
 
 fn allocPages(count: usize) []u8 {
@@ -179,8 +260,12 @@ fn allocPages(count: usize) []u8 {
         @panic("out of memory");
     }
 
-    defer S.next_ram_index += size;
-    return ram[S.next_ram_index .. S.next_ram_index + size];
+    const result = ram[S.next_ram_index .. S.next_ram_index + size];
+    S.next_ram_index += size;
+
+    @memset(result, 0);
+
+    return result;
 }
 
 export fn kernelMain() noreturn {

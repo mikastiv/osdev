@@ -30,6 +30,9 @@ pub fn build(b: *std.Build) void {
     run_cmd.addArg("-nographic");
     run_cmd.addArg("--no-reboot");
 
+    run_cmd.addArgs(&.{ "-d", "unimp,guest_errors,int,cpu_reset" });
+    run_cmd.addArgs(&.{ "-D", "qemu.log" });
+
     run_cmd.addArg("-kernel");
     run_cmd.addArtifactArg(kernel);
 
