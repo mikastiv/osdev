@@ -2,6 +2,7 @@ const std = @import("std");
 const common = @import("common.zig");
 
 const kernel_base = @extern([*]u8, .{ .name = "__kernel_base" });
+const user_base = @extern([*]u8, .{ .name = "__user_base" });
 const bss = @extern([*]u8, .{ .name = "__bss" });
 const bss_end = @extern([*]u8, .{ .name = "__bss_end" });
 const stack_top = @extern([*]u8, .{ .name = "__stack_top" });
@@ -9,6 +10,8 @@ const stack_top = @extern([*]u8, .{ .name = "__stack_top" });
 const ram_start = @extern([*]u8, .{ .name = "__free_ram_start" });
 const ram_end = @extern([*]u8, .{ .name = "__free_ram_end" });
 const page_size = 4 * 1024;
+
+const user_image = @embedFile("shell.bin");
 
 var console: common.Console = .init;
 
@@ -83,7 +86,7 @@ const Process = struct {
         .stack = @splat(0),
     };
 
-    fn create(entry: ?*const anyopaque) *Process {
+    fn create(image: []const u8) *Process {
         const process = for (&processes) |*proc| {
             if (proc.state == .unused) break proc;
         } else @panic("no free process slots");
@@ -95,16 +98,29 @@ const Process = struct {
             word_stack[sp] = 0;
         }
         sp -= 1;
-        word_stack[sp] = @intFromPtr(entry); // ra
+        word_stack[sp] = @intFromPtr(&userEntry); // ra
 
         const page_table: [*]PageTableEntry = @ptrCast(@alignCast(allocPages(1)));
 
+        // Map kernel pages.
         const page_count = (ram_end - kernel_base) / page_size;
         const pages: [*][page_size]u8 = @ptrCast(kernel_base);
         for (pages[0..page_count]) |*page| {
             const flags: PageTableEntry.Flags = .{ .read = true, .write = true, .execute = true };
             const paddr = @intFromPtr(page);
             mapPage(page_table, paddr, paddr, flags);
+        }
+
+        // Map user pages.
+        var image_pages = std.mem.window(u8, image, page_size, page_size);
+        while (image_pages.next()) |image_page| {
+            const page = allocPages(1);
+            @memcpy(page[0..image_page.len], image_page);
+
+            const flags: PageTableEntry.Flags = .{ .read = true, .write = true, .execute = true, .user = true };
+            const vaddr = @intFromPtr(user_base + (image_page.ptr - image.ptr));
+            const paddr = @intFromPtr(page.ptr);
+            mapPage(page_table, vaddr, paddr, flags);
         }
 
         const offset = process - &processes[0];
@@ -147,23 +163,17 @@ const VirtualAddr = packed struct(u32) {
 
 var processes: [Process.max]Process = @splat(.init);
 
-var process_a: *Process = undefined;
-var process_b: *Process = undefined;
+fn userEntry() callconv(.naked) void {
+    const sstatus_spie = 1 << 5;
 
-fn processA() void {
-    console.writer.print("Starting process A, pid={d}\n", .{process_a.pid}) catch {};
-    while (true) {
-        console.writer.writeByte('A') catch {};
-        yield();
-    }
-}
-
-fn processB() void {
-    console.writer.print("Starting process B, pid={d}\n", .{process_b.pid}) catch {};
-    while (true) {
-        console.writer.writeByte('B') catch {};
-        yield();
-    }
+    asm volatile (
+        \\csrw sepc, %[sepc]
+        \\csrw sstatus, %[sstatus]
+        \\sret
+        :
+        : [sepc] "r" (user_base),
+          [sstatus] "r" (sstatus_spie),
+    );
 }
 
 var current_process: *Process = undefined;
@@ -175,19 +185,15 @@ fn main() !void {
 
     Csr.write(.stvec, @intFromPtr(&kernelEntry));
 
-    console.writer.print("creating idle\n", .{}) catch {};
-    idle_process = Process.create(null);
+    idle_process = Process.create(&.{});
     idle_process.pid = 0;
     current_process = idle_process;
 
-    console.writer.print("creating A\n", .{}) catch {};
-    process_a = Process.create(&processA);
-    console.writer.print("creating B\n", .{}) catch {};
-    process_b = Process.create(&processB);
+    _ = Process.create(user_image);
 
     yield();
 
-    unreachable;
+    @panic("switched to idle process");
 }
 
 fn mapPage(table1: [*]PageTableEntry, vaddr: usize, paddr: usize, flags: PageTableEntry.Flags) void {

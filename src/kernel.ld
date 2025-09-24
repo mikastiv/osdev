@@ -1,6 +1,8 @@
 ENTRY(boot)
 
 SECTIONS {
+    __user_base = 0x1000000;
+
     . = 0x80200000;
 
     __kernel_base = .;
