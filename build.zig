@@ -36,6 +36,39 @@ pub fn build(b: *std.Build) void {
     run_cmd.addArg("-kernel");
     run_cmd.addArtifactArg(kernel);
 
+    const shell = b.addExecutable(.{
+        .name = "shell.elf",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/shell.zig"),
+            .target = target,
+            .optimize = .ReleaseSmall,
+            .strip = false,
+        }),
+    });
+    shell.setLinkerScript(b.path("src/user.ld"));
+    shell.entry = .disabled;
+
+    const elf2bin = b.addObjCopy(
+        shell.getEmittedBin(),
+        .{
+            // .set_section_flags = .{
+            //     .section_name = ".bss",
+            //     .flags = .{ .alloc = true, .contents = true },
+            // },
+            .format = .bin,
+        },
+    );
+
+    // const elf2bin = b.addSystemCommand(&.{"llvm-objcopy"});
+    // elf2bin.addArgs(&.{ "--set-section-flags", ".bss=alloc,contents" });
+    // elf2bin.addArgs(&.{ "-O", "binary" });
+    // elf2bin.addArtifactArg(shell);
+
+    // const bin = elf2bin.addOutputFileArg("shell.bin");
+    kernel.root_module.addAnonymousImport("shell.bin", .{ .root_source_file = elf2bin.getOutput() });
+
+    b.installArtifact(shell);
+
     const run_step = b.step("run", "Launch the kernel");
     run_step.dependOn(&run_cmd.step);
 }
