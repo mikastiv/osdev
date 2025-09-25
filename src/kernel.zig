@@ -1,5 +1,8 @@
 const std = @import("std");
+
 const common = @import("common.zig");
+const sbi = @import("sbi.zig");
+const Syscall = @import("sys.zig").Syscall;
 
 const kernel_base = @extern([*]u8, .{ .name = "__kernel_base" });
 const user_base = @extern([*]u8, .{ .name = "__user_base" });
@@ -13,14 +16,19 @@ const page_size = 4 * 1024;
 
 const user_image = @embedFile("shell.bin");
 
-var console: common.Console = .init;
+var console: common.Console = .init(&putChar);
 
 const Csr = enum {
     sscratch,
+    sstatus,
     stvec,
     scause,
     stval,
     sepc,
+
+    const satp_sv32 = 1 << 31;
+    const scause_ecall = 8;
+    const sstatus_spie = 1 << 5;
 
     pub fn read(comptime self: Csr) usize {
         return asm volatile ("csrr %[ret], " ++ @tagName(self)
@@ -164,15 +172,13 @@ const VirtualAddr = packed struct(u32) {
 var processes: [Process.max]Process = @splat(.init);
 
 fn userEntry() callconv(.naked) void {
-    const sstatus_spie = 1 << 5;
-
     asm volatile (
         \\csrw sepc, %[sepc]
         \\csrw sstatus, %[sstatus]
         \\sret
         :
         : [sepc] "r" (user_base),
-          [sstatus] "r" (sstatus_spie),
+          [sstatus] "r" (Csr.sstatus_spie),
     );
 }
 
@@ -238,7 +244,6 @@ noinline fn yield() void {
 
     if (next_process == current_process) return;
 
-    const satp_sv32: usize = 1 << 31;
     const ppn = @intFromPtr(next_process.page_table) / page_size;
     asm volatile (
         \\sfence.vma
@@ -246,7 +251,7 @@ noinline fn yield() void {
         \\sfence.vma
         \\csrw sscratch, %[next_top]
         :
-        : [satp] "r" (satp_sv32 | ppn),
+        : [satp] "r" (Csr.satp_sv32 | ppn),
           [next_top] "r" (next_process.stack[next_process.stack.len..].ptr),
     );
 
@@ -272,6 +277,10 @@ fn allocPages(count: usize) []u8 {
     @memset(result, 0);
 
     return result;
+}
+
+fn putChar(char: u8) !void {
+    _ = try sbi.call(char, 0, 0, 0, 0, 0, 0, 1);
 }
 
 export fn kernelMain() noreturn {
@@ -418,12 +427,28 @@ export fn kernelEntry() align(4) callconv(.naked) void {
 }
 
 export fn handleTrap(frame: *TrapFrame) void {
-    _ = frame;
     const scause = Csr.read(.scause);
     const stval = Csr.read(.stval);
-    const user_pc = Csr.read(.sepc);
+    var user_pc = Csr.read(.sepc);
 
-    std.debug.panic("unexpected trap scause={x}, stval={x}, sepc={x}", .{ scause, stval, user_pc });
+    if (scause == Csr.scause_ecall) {
+        handleSyscall(frame);
+        user_pc += 4;
+    } else {
+        std.debug.panic("unexpected trap scause={x}, stval={x}, sepc={x}", .{ scause, stval, user_pc });
+    }
+
+    Csr.write(.sepc, user_pc);
+}
+
+fn handleSyscall(frame: *TrapFrame) void {
+    const syscall: Syscall = @enumFromInt(frame.a0);
+    switch (syscall) {
+        Syscall.putchar => console.writer.writeByte(@truncate(frame.a1)) catch |err| {
+            frame.a0 = @intFromError(err);
+        },
+        else => std.debug.panic("unexpected syscall a0={x}\n", .{frame.a0}),
+    }
 }
 
 pub fn panic(

@@ -30,7 +30,7 @@ pub fn call(
     arg5: isize,
     fid: isize,
     eid: isize,
-) SbiError!isize {
+) SbiError!usize {
     var err: isize = undefined;
     var value: isize = undefined;
 
@@ -66,5 +66,5 @@ pub fn call(
         else => SbiError.Unknown,
     };
 
-    return value;
+    return @intCast(value);
 }
