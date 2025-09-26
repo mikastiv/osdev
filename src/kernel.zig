@@ -16,7 +16,8 @@ const page_size = 4 * 1024;
 
 const user_image = @embedFile("shell.bin");
 
-var console: common.Console = .init(&putChar);
+var read_buffer: [128]u8 = undefined;
+var console: common.Console = .init(&putChar, &getChar, &read_buffer);
 
 const Csr = enum {
     sscratch,
@@ -81,7 +82,7 @@ const Process = struct {
     const max = 8;
 
     pid: usize,
-    state: enum { unused, runnable },
+    state: enum { unused, runnable, exited },
     sp: usize,
     page_table: [*]PageTableEntry,
     stack: [8192]u8 align(4),
@@ -283,6 +284,11 @@ fn putChar(char: u8) !void {
     _ = try sbi.call(char, 0, 0, 0, 0, 0, 0, 1);
 }
 
+fn getChar() !u8 {
+    const result = try sbi.call(0, 0, 0, 0, 0, 0, 0, 2);
+    return @intCast(result.err);
+}
+
 export fn kernelMain() noreturn {
     main() catch |err| {
         std.debug.panic("failed with: {t}", .{err});
@@ -444,8 +450,24 @@ export fn handleTrap(frame: *TrapFrame) void {
 fn handleSyscall(frame: *TrapFrame) void {
     const syscall: Syscall = @enumFromInt(frame.a0);
     switch (syscall) {
-        Syscall.putchar => console.writer.writeByte(@truncate(frame.a1)) catch |err| {
-            frame.a0 = @intFromError(err);
+        .putchar => console.writer.writeByte(@truncate(frame.a1)) catch {
+            frame.a0 = @bitCast(@as(isize, -1));
+        },
+        .getchar => {
+            while (true) {
+                if (getChar()) |byte| {
+                    frame.a0 = byte;
+                    break;
+                } else |_| {}
+
+                yield();
+            }
+        },
+        .exit => {
+            console.writer.print("process {d} exited\n", .{current_process.pid}) catch {};
+            current_process.state = .exited;
+            yield();
+            unreachable;
         },
         else => std.debug.panic("unexpected syscall a0={x}\n", .{frame.a0}),
     }
