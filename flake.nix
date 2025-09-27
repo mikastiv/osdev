@@ -20,6 +20,7 @@
             curl
             qemu
             llvm
+            gdb
           ];
         };
       });

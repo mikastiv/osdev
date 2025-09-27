@@ -15,11 +15,7 @@ pub fn main() !void {
         var buffer: [256]u8 = undefined;
         var cmdline: []const u8 = &.{};
         for (0..buffer.len) |i| {
-            // const char = try user.getChar();
-            const char = console.reader.takeByte() catch |err| {
-                try console.writer.print("err={t}\n", .{err});
-                continue :prompt;
-            };
+            const char = try console.reader.takeByte();
             try console.writer.writeByte(char);
             if (char == '\r') {
                 try console.writer.writeByte('\n');

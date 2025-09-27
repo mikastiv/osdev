@@ -3,6 +3,7 @@ const std = @import("std");
 const common = @import("common.zig");
 const sbi = @import("sbi.zig");
 const Syscall = @import("sys.zig").Syscall;
+const virtio = @import("virtio.zig");
 
 const kernel_base = @extern([*]u8, .{ .name = "__kernel_base" });
 const user_base = @extern([*]u8, .{ .name = "__user_base" });
@@ -12,12 +13,12 @@ const stack_top = @extern([*]u8, .{ .name = "__stack_top" });
 
 const ram_start = @extern([*]u8, .{ .name = "__free_ram_start" });
 const ram_end = @extern([*]u8, .{ .name = "__free_ram_end" });
-const page_size = 4 * 1024;
+pub const page_size = 4 * 1024;
 
 const user_image = @embedFile("shell.bin");
 
 var read_buffer: [128]u8 = undefined;
-var console: common.Console = .init(&putChar, &getChar, &read_buffer);
+pub var console: common.Console = .init(&putChar, &getChar, &read_buffer);
 
 const Csr = enum {
     sscratch,
@@ -119,6 +120,7 @@ const Process = struct {
             const paddr = @intFromPtr(page);
             mapPage(page_table, paddr, paddr, flags);
         }
+        mapPage(page_table, virtio.blk_paddr, virtio.blk_paddr, .{ .read = true, .write = true });
 
         // Map user pages.
         var image_pages = std.mem.window(u8, image, page_size, page_size);
@@ -131,6 +133,8 @@ const Process = struct {
             const paddr = @intFromPtr(page.ptr);
             mapPage(page_table, vaddr, paddr, flags);
         }
+
+        // Virtio
 
         const offset = process - &processes[0];
         process.pid = offset + 1;
@@ -191,6 +195,17 @@ fn main() !void {
     @memset(bss[0..bss_size], 0);
 
     Csr.write(.stvec, @intFromPtr(&kernelEntry));
+
+    virtio.init();
+
+    var buffer: [virtio.sector_size]u8 = undefined;
+    virtio.readWriteDisk(&buffer, 0, false);
+
+    const str: [*:0]u8 = @ptrCast(&buffer);
+    try console.writer.print("first sector: {s}\n", .{std.mem.span(str)});
+
+    std.mem.copyForwards(u8, &buffer, "hello from kernel");
+    virtio.readWriteDisk(&buffer, 0, true);
 
     idle_process = Process.create(&.{});
     idle_process.pid = 0;
@@ -261,7 +276,7 @@ noinline fn yield() void {
     switchContext(&prev_process.sp, &next_process.sp);
 }
 
-fn allocPages(count: usize) []u8 {
+pub fn allocPages(count: usize) []u8 {
     const S = struct {
         var next_ram_index: usize = 0;
     };

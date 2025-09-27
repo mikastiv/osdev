@@ -12,7 +12,8 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/kernel.zig"),
             .target = target,
-            .optimize = .ReleaseSmall,
+            // .optimize = .ReleaseSmall,
+            .optimize = .Debug,
             .strip = false,
         }),
     });
@@ -33,8 +34,14 @@ pub fn build(b: *std.Build) void {
     run_cmd.addArgs(&.{ "-d", "unimp,guest_errors,int,cpu_reset" });
     run_cmd.addArgs(&.{ "-D", "qemu.log" });
 
+    run_cmd.addArgs(&.{ "-drive", "id=drive0,file=lorem.txt,format=raw,if=none" });
+    run_cmd.addArgs(&.{ "-device", "virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0" });
+
     run_cmd.addArg("-kernel");
     run_cmd.addArtifactArg(kernel);
+
+    // run_cmd.addArg("-S");
+    // run_cmd.addArgs(&.{ "-gdb", "tcp::1234" });
 
     const shell = b.addExecutable(.{
         .name = "shell.elf",
